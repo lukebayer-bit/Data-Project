@@ -1,0 +1,400 @@
+---
+title: 'Project 2'
+author: 'Luke Bayer'
+date: '2025-11-12'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+## **Introduction**
+
+![](https://www.sfmta.com/files/styles/media_image_default_1x/public/images/2025-08/250320_Speed_Press_RUSH_20.jpg?itok=EeiXD66C){align="right" width="326"}
+
+\n My dataset consists of counts of warnings and citations issued by the automated cameras ran by the SFMTA’s Automated Speed Enforcement program.
+I sourced the data from San Francisco Open Data, a website that collects relevant data from various city and county level departments.
+A link to the specific dataset I am using can be found [here](https://data.sfgov.org/Transportation/Automated-Speed-Enforcement-Citations/d5uh-bk84/about_data).
+I chose this dataset because it was well documented, as well as being over a topic I am interested in.
+I will be investigating trends such as the violations by day of the week and the speeds captured by location, I will also be looking at the correlations between posted speed limits and cited speeds, and if the implementation of speed cameras had a significant effect on the speeding captured in San Francisco.
+
+## **Data Preparation**
+
+```{r, include=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(kableExtra)
+cams = read.csv('Automated_Speed_Enforcement_Citations_20251107.csv')
+#Removing unused variables
+cams[c('enforcement_type', 'data_as_of', 'data_loaded_at', 'site_id', 'analysis_neighborhood')] = list(NULL)
+
+#Formatting the main dataset and fixing variables 
+cams$date = str_replace_all(cams$date, ' 12:00:00 AM', '')
+cams$date = ymd(cams$date)
+cams$issued_warnings = as.integer(parse_number(cams$issued_warnings))
+cams$issued_citations = as.integer(cams$issued_citations)
+cams$posted_speed = as.numeric(cams$posted_speed)
+
+#Creating the total_issued variable
+cams$issued_total = cams$issued_citations + cams$issued_warnings
+
+#Replacing the NA values in the "X_a_to_b_mph_over" variables with 0
+cams = mutate(cams, across(c(X_11_to_15_mph_over:X_21_plus_mph_over), ~replace_na(., 0)))
+
+#Creating a pivoted dataset so I can use facet_wrap instead of individual graphs for the X speed over variables
+mph = pivot_longer(
+  cams,
+  cols = c(X_11_to_15_mph_over:X_21_plus_mph_over),
+  names_to = 'speed',
+  values_to = 'count'
+)
+
+#Function used to create a new dataframe based around a certain categorical variable
+mush = function(df, v, func, var = is.numeric) {
+  temp_group = group_by(df, {{v}})
+  summarise(temp_group, across(where(var), func, na.rm = TRUE))
+}
+
+#Shape files for map
+san_fran = st_read('./mapdata/sanfran.shp')
+san_fran_dist = st_read('./mapdata/dist.shp')
+
+#Adding the district geometry to the main dataframe
+cams = inner_join(
+  cams,
+  select(san_fran_dist, 'geometry', 'sup_dist'),
+  by = c('supervisor_district' = 'sup_dist')
+)
+```
+
+I downloaded this data from San Francisco Open Data, it was easily accessed and provided descriptions of the variables as well as a preview of the dataset.
+Although the dataset came very cleaned and processed, this in itself provided a challenge as in order to use the data how I needed, I had to do extensive processing.
+I parsed the date variable by first as a string to remove the extraneous time, then as a y/m/d date.
+I changed the variable type for many of the numeric variables according to their usage in my analyses, and created my total issued violations variable by combining the issued citations and issued warnings.
+The NA values in the avg issued speed column did were ignored, but for the mph over limit columns the NAs were replaced with 0s.
+A separate dataframe, for use in a specific analysis, was created by pivoting longer.
+Here I also established my 'mush' function which does lots of data reshaping in the report.
+Finally I joined the supervisor district geometries to the main dataframe so I could give values to the districts in my analysis.
+The final processed data has 6170 observations.
+
+## **Variables**
+
+```{r}
+var_clean = (data.frame(
+  Variable = colnames(cams),
+  Description = c(
+    'Date (YYY-MM-DD)',
+    'Street address and direction of traffic',
+    'Day of the week',
+    'Number of warnings issued',
+    'Number of citations issued',
+    'Posted speed limit',
+    'Average speed of issued violations',
+    'Number of vehicles who travelled 11-15 mph over the limit',
+    'Number of vehicles who travelled 16-20 mph over the limit',
+    'Number of vehicles who travelled over 21 mph over the limit',
+    'Geographic location of camera',
+    'Latitude of camera',
+    'Longitude of camera',
+    'Supervisor district of camera',
+    'Total number of violations issued',
+    'Supervisory district polygons'
+  ),
+  Type = unname(sapply(cams, typeof))
+))
+var_clean = kbl(var_clean)
+kable_styling(var_clean)
+```
+
+## **Univariate Analyses**
+
+```{r, fig.height = 4, fig.width = 5.5}
+#The posted speed here essentially acts like a categorical variable, as it is 3 separate values that are tied only to location
+
+#Mushes cams by taking the median of values for each unique point
+#Point is used as the grouping variable because location has repeated values with only a different direction, so the speed limit would have to b the same, and the data would be offset by locations with 2 cameras
+cams_med = mush(cams, point, median)
+ggplot(cams_med) +
+  geom_bar(
+    aes(x = posted_speed),
+    fill = 'gold',
+    col = 'black',
+    binwidth = 5,
+    linewidth = 0.5
+  ) +
+  labs(
+    title = 'Distribution of Posted Speed Limits', 
+    x = 'Posted Speed', 
+    y ='Count'
+    ) +
+  scale_x_continuous(breaks = seq(20, 30, by = 5)) +
+  theme_linedraw()
+```
+
+This graph shows the frequency of each posted speed limit that the cameras monitor, that being 20, 25, and 30 miles per hour.
+The lowest frequency limit is 20 mph which makes up `r round((sum(cams_med$posted_speed==20)/nrow(cams_med))*100,2)`% of the posted speeds, then 30 at `r round((sum(cams_med$posted_speed==30)/nrow(cams_med))*100,2)`%, and highest is 25 mph at `r round((sum(cams_med$posted_speed==25)/nrow(cams_med))*100,2)`%.
+There are `r sum(cams_med$posted_speed==20)` locations with a speed limit of 20 mph, `r sum(cams_med$posted_speed==25)` 25 mph locations, and `r sum(cams_med$posted_speed==30)` 30 mph locations.
+The graph peaks in the middle at 25 mph.
+
+```{r, fig.height = 4, fig.width = 7}
+#This uses a pivoted dataframe to analyze 3 similar variables
+ggplot(mph) +
+  geom_histogram(
+    aes(x = count),
+    fill = 'gold',
+    col = 'black',
+    linewidth = 0.4,
+    binwidth = 25
+  ) +
+  labs(
+    title = 'Distribution of Infraction Severities', 
+    x = 'Count', 
+    y = 'Frequency (log scale)'
+    )  +
+  theme_linedraw() +
+  scale_y_log10()+
+  #Renames the individual graphs
+  facet_wrap( ~ speed, labeller = labeller(
+    speed = c(
+      'X_11_to_15_mph_over' = '11 to 15 mph Over',
+      'X_16_to_20_mph_over' = '16 to 20 mph Over',
+      'X_21_plus_mph_over' = '21+ mph Over'
+    )
+  ))
+```
+
+These 3 graphs each show the frequency of violations that occurred at 11-15, 16-10, and 21+ mph over the posted speed limits.
+The first graph has a median of `r round(median(cams$X_11_to_15_mph_over, na.rm=TRUE),3)` with a median absolute deviation of `r round(mad(cams$X_11_to_15_mph_over, na.rm=TRUE),3)`, the second has a median of `r round(median(cams$X_16_to_20_mph_over, na.rm=TRUE),3)` with a median absolute deviation of `r round(mad(cams$X_16_to_20_mph_over, na.rm=TRUE),3)`, and the third has a median of `r round(median(cams$X_21_plus_mph_over, na.rm=TRUE),3)` with a median absolute deviation of `r round(mad(cams$X_21_plus_mph_over, na.rm=TRUE),3)`.
+These large MADs show that the data is extremely variable, however the 11-15 mph range is generally the most frequent violation.
+Greater clustering towards the left means less occurrences of speeding in that range.
+
+```{r, fig.height = 4, fig.width = 5}
+ggplot(cams) +
+  geom_histogram(
+    aes(x = avg_issued_speed),
+    fill = 'gold',
+    col = 'black',
+    binwidth = 0.3,
+    linewidth = 0.4
+  ) +
+  labs(
+    title = 'Distribution of Issued Speeds', 
+    x = 'Avg Issued Speed (mph)', 
+    y ='Count'
+    ) +
+  scale_x_continuous(limits = c(30, 55), breaks = seq(30, 55, by = 5)) +
+  scale_y_continuous(breaks = seq(0, 500, by = 100)) +
+  theme_linedraw()
+```
+
+This graph shows the frequency of the average issued speeds, meaning the daily average from each camera, of the speed that violators were traveling.
+It reflects the distribution of the previous 2 graphs; the majority of speeding happened within the 11-15 mph over the limit range, and the most frequent limit was 25 mph.
+The graph has 3 peaks, each around 11-15 mph from 20, 25, and 30 respectively, and the order of those peaks is consistent with the 1st graphs peaks.
+The mean value is `r round(mean(cams$avg_issued_speed, na.rm=TRUE),3)` mph with a standard deviation of `r round(sd(cams$avg_issued_speed, na.rm=TRUE),3)`.
+
+## **Multivariate Analyses**
+
+```{r, fig.height = 9, fig.width = 10}
+#Using the mush function, it takes the mean of every numerical value for each unique location in the cams df
+cams_avg = mush(cams, location, mean)
+
+#Loops through the location column in the newly created cams_avg, and assigns a cardinal direction to each row based on the first letter of the location
+direction = c()
+direc = c('N', 'E', 'S', 'W')
+for (n in 1:(nrow(cams_avg))) {
+  for (i in 1:4) {
+    if (str_detect(cams_avg$location[n], paste0('^', direc[i]))) {
+      direction = c(direction, direc[i])
+    }
+  }
+}
+cams_avg$direction = direction
+
+#creates the data used to assign values to districts with the mush fucntion
+#Uses the cams df, by the geometry column, and takes the mean
+cams_dist_avg = mush(cams, geometry, mean)
+
+ggplot() +
+  #District layer
+  geom_sf(
+    data = cams_dist_avg,
+    aes(geometry = geometry, fill = round(posted_speed, 0)),
+    col = 'black',
+    linewidth = 0.2
+  ) +
+  #Roads layer
+  geom_sf(data = san_fran, size = 0.1, alpha = 0.5) +
+  #Camera Points
+  geom_point(
+    data = cams_avg,
+    aes(
+      x = longitude,
+      y = latitude,
+      shape = direction,
+      fill = (avg_issued_speed)
+    ),
+    col = 'black',
+    size = 3,
+    stroke = 0.3
+  ) +
+  coord_sf(xlim = c(-122.51, -122.36),
+           ylim = c(37.7127, 37.81)) +
+  scale_shape_manual(values = c(23, 24, 25, 22)) +
+  scale_fill_gradient(low = 'yellow', high = 'purple') +
+  theme_classic() +
+  theme(
+    panel.background = element_rect(fill = 'lightblue'),
+    axis.text.x = element_text(angle = 320),
+    plot.caption = element_text(size = 9)
+  ) +
+  labs(
+    title = 'Map of Average Issued Speeds Across San Francisco (Apr-Aug)',
+    x = 'Longitude',
+    y = 'Latitude',
+    fill = 'Speed (mph)',
+    shape = 'Camera Direction',
+    caption = 'Points represent cameras average issued speed over the time period. \n The gradient fill represents the average posted speed limit in the coresponding supervisor district.'
+  )
+```
+
+This map displays the average speed limit for each supervisor district, and then the average issued speed at each camera, with the shape of the point signifying traffic direction.
+The correlation between posted speeds and average issued speeds is very positively strong at `r round(cor(cams_avg$avg_issued_speed,cams_avg$posted_speed, use ='complete.obs'),3)`.
+
+```{r, fig.height = 4.5, fig.width = 8}
+#Uses the mush function to sum all integers according to the rest of the parameters
+cams_temp1 = mush(cams, date, sum, is.integer)
+#Uses the mush function to avg only numeric variables according to the rest of the parameters
+cams_temp2 = mush(cams, date, mean, is.double)
+#combines the two dfs into one with a mix of summed and averaged values
+cams_sum = full_join(cams_temp1, cams_temp2, by = 'date')
+
+ggplot(cams_sum, aes(x = date)) +
+  geom_line(aes(y = issued_citations / 100, color = 'Citations'), linewidth = 0.4) +
+  geom_line(aes(y = issued_total / 100, color = 'Total'), linewidth = 0.4) +
+  geom_line(aes(y = issued_warnings / 100, color = 'Warnings'), linewidth = 0.4) +
+  labs(
+    title = 'Number of Daily Issued Violations Over Time',
+    color = 'Issued Violation Type',
+    x = 'Date',
+    y = 'Total Issued (hundreds)'
+  ) +
+  theme_linedraw() +
+  scale_y_continuous(breaks = seq(0, 85, by = 10)) +
+  scale_color_manual(values = c('gold', 'orange', 'red'))
+```
+
+This graph shows the number of issued violations by type over the time period of the dataset.
+The spike in citations in August is due to that being when the cameras started issuing them, however I am unsure of the cause for the saw dip in June.
+The graph initially rises quickly which may be due to the cameras being used more, or because it is nearing summer so more people are on the roads.
+The dip after July might be attributed to the ending of summer, as well as increased awareness of the camera system by the public so less speeding.
+Overall there is not a significant correlation between time and issued violations, however there are many spots on interest, especially in a seasonal frame.
+
+```{r, fig.height = 5, fig.width = 7.3}
+#Creates a mushed df by day of the week, and orders it accordingly
+week = c('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+cams_dow_sum = mush(cams, dow, sum, is.integer)
+cams_dow_sum$dow = (factor(cams_dow_sum$dow, levels = week))
+
+ggplot(cams_dow_sum, aes(x = dow)) +
+  geom_line(aes(
+    y = issued_total / 1000,
+    group = 1,
+    col = 'Total'
+  ), linewidth = 1) +
+  geom_line(aes(
+    y = X_11_to_15_mph_over / 1000,
+    group = 1,
+    col = '11 to 15 mph Over'
+  ),
+  linewidth = 1) +
+  geom_line(aes(
+    y = X_16_to_20_mph_over / 1000,
+    group = 1,
+    col = '16 to 20 mph Over'
+  ),
+  linewidth = 1) +
+  geom_line(aes(
+    y = X_21_plus_mph_over / 1000,
+    group = 1,
+    col = '20+ mph Over'
+  ),
+  linewidth = 1) +
+  labs(title = 'Issued Violations by Day of The Week (Apr-Aug)',
+       x = 'Day of The Week',
+       y = 'Total Issued (thousands)',
+       col = 'Violations at Certain Speeds') +
+  scale_color_manual(values = c('gold', 'orange', 'red', 'skyblue')) +
+  scale_y_continuous(breaks = seq(0, 75, by = 10)) +
+  theme_linedraw()
+
+```
+
+This graph shows a very strong relation between day of the week and total issued violations.
+The data has a large peak of `r cams_dow_sum$issued_total[cams_dow_sum$dow == 'Fri']` on Friday, and a low of `r cams_dow_sum$issued_total[cams_dow_sum$dow == 'Mon']` at the beginning of the week on Monday.
+The correlation is also reflected at other speeds over the limit, however it is much weaker, especially for 16+ mph.
+This makes the range of this data `r cams_dow_sum$issued_total[cams_dow_sum$dow == 'Mon']`-`r cams_dow_sum$issued_total[cams_dow_sum$dow == 'Fri']`, with a median of `r median(cams_dow_sum$issued_total, na.rm=TRUE)`.
+
+```{r}
+mph$dow = (factor(mph$dow, levels = week))
+ggplot(mph) +
+  geom_col(
+    aes(
+      x = speed,
+      y = count,
+      col = speed,
+      fill = speed
+    ),
+    linewidth = 0.4,
+    binwidth = 25
+  ) +
+  labs(x = 'Speed Over The Limit', y = 'Count', title = 'Distribution of Infraction Severities by Day')  +
+  theme_linedraw() +
+  scale_y_log10() +
+  scale_color_manual(values = c('gold', 'orange', 'red')) +
+  scale_fill_manual(values = c('gold', 'orange', 'red')) +
+  theme(axis.text.x = element_blank()) +
+  facet_wrap(~ dow)
+```
+
+These graphs show the distribution of speeds over the limit faceted by the day of the week.
+There does not appear to be any significant difference between what percent each speed over the limit is out of the total, only the previously seen patterns about which days get the most violations.
+This set of graphs was meant to allow closer analysis of the previous one.
+
+## **Choice Elements**
+
+I used a join to add the supervisor district geometry dataset to my main cams dataset in the data preparation, and then later I use one to create an aggregate dataframe that contains both summed and averaged variables.
+During the data preparation I also created the total_issued variable which is a sum of the citations and warnings, and then I also created a direction variable for the map in order to differentiate the different cameras in the same location.
+I used both string and date parsing in order to make the date variable readable in the data preparation.
+For the map I used both a for loop and an if statement to assign directions based on the location names.
+Finally I created a function to easily summarize dataframes by certain parameters.
+In line code is used throughout.
+
+## **Conclusion**
+
+Through my analyses I found that the most frequent speeding captured by the SFMTA camera system was between 11-15 mph above the speed limit, which was majority 25 mph.
+The implementation of the cameras has led to a slight decline in speeding over time, however this was only in the most recent month.
+The day of the week has a very significant effect on the number of issued speeding violations, peaking on Fridays, with a low on Mondays.
+The relationships I found were for the most part expected, however the change over time of issued violations gave very odd results, and I would like to look into why that may be further.
+
+## **References**
+
+Automated Speed Enforcement Citations.
+DataSF.
+<https://data.sfgov.org/Transportation/Automated-Speed-Enforcement-Citations/d5uh-bk84/about_data>
+
+2024 TIGER/Line® Shapefiles: All Lines.
+US Census Bureau, Geography Division.
+<https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2024&layergroup=All+Lines>
+
+Map of Current Supervisor Districts.
+San Francisco Redistricting Task Force.
+<https://data.sfgov.org/Geographic-Locations-and-Boundaries/Map-of-Current-Supervisor-Districts/tadv-nifg>
+
+Rebecca Ashton-Dziedzan.
+Speed Camera Tickets Start Today: What's Next and the Impact So Far.
+SFMTA <https://www.sfmta.com/blog/speed-camera-tickets-start-today-whats-next-and-impact-so-far>
